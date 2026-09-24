@@ -6,13 +6,15 @@ import androidx.activity.compose.setContent
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -20,6 +22,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.rickandmortyexplorer.ui.theme.RickAndMortyExplorerTheme
@@ -57,6 +60,30 @@ val sampleCharacters = listOf(
         species = "Human",
         gender = "Female",
         imageRes = R.drawable.summer
+    ),
+    Character(
+        id = 4,
+        name = "Krombopulos Michael",
+        status = "Dead",
+        species = "Gromflomite",
+        gender = "Male",
+        imageRes = R.drawable.rick
+    ),
+    Character(
+        id = 5,
+        name = "Talking Cat",
+        status = "unknown",
+        species = "Animal",
+        gender = "Male",
+        imageRes = R.drawable.morty
+    ),
+    Character(
+        id = 6,
+        name = "Abradolf Lincler",
+        status = "Dead",
+        species = "Human / Genetic Experiment",
+        gender = "Male",
+        imageRes = R.drawable.summer
     )
 )
 
@@ -74,6 +101,18 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CharactersCatalogScreen() {
+    val filterCategories = listOf("Всі", "Alive", "Dead", "unknown")
+
+    var selectedStatus by remember { mutableStateOf("Всі") }
+
+    val filteredCharacters = remember(selectedStatus) {
+        if (selectedStatus == "Всі") {
+            sampleCharacters
+        } else {
+            sampleCharacters.filter { it.status.equals(selectedStatus, ignoreCase = true) }
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -90,16 +129,99 @@ fun CharactersCatalogScreen() {
             )
         }
     ) { innerPadding ->
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            items(sampleCharacters) { character ->
-                CharacterCard(character = character)
+            StatusFilterRow(
+                categories = filterCategories,
+                selectedCategory = selectedStatus,
+                onCategorySelected = { newCategory ->
+                    selectedStatus = newCategory
+                }
+            )
+            if (filteredCharacters.isEmpty()) {
+                EmptyStateView(status = selectedStatus)
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(filteredCharacters, key = { it.id }) { character ->
+                        CharacterCard(character = character)
+                    }
+                }
             }
+        }
+    }
+}
+
+@Composable
+fun StatusFilterRow(
+    categories: List<String>,
+    selectedCategory: String,
+    onCategorySelected: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        categories.forEach { category ->
+            val isSelected = category == selectedCategory
+            FilterChip(
+                selected = isSelected,
+                onClick = { onCategorySelected(category) },
+                label = {
+                    Text(
+                        text = when (category) {
+                            "Alive" -> "Живі"
+                            "Dead" -> "Мертві"
+                            "unknown" -> "Невідомо"
+                            else -> "Всі"
+                        }
+                    )
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.primary,
+                    selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                )
+            )
+        }
+    }
+}
+
+@Composable
+fun EmptyStateView(status: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = "🔍",
+                fontSize = 48.sp
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Персонажів не знайдено",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Немає персонажів із категорією «$status». Спробуйте вибрати інший фільтр.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.outline,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
@@ -131,9 +253,15 @@ fun CharacterCard(character: Character) {
                     modifier = Modifier.fillMaxSize()
                 )
 
+                val badgeColor = when (character.status) {
+                    "Alive" -> Color(0xFF2E7D32)
+                    "Dead" -> Color(0xFFC62828)
+                    else -> Color.Gray
+                }
+
                 Surface(
                     shape = RoundedCornerShape(topStart = 8.dp),
-                    color = if (character.status == "Alive") Color(0xFF2E7D32) else Color.Gray,
+                    color = badgeColor,
                     modifier = Modifier.align(Alignment.BottomEnd)
                 ) {
                     Text(
@@ -148,9 +276,7 @@ fun CharacterCard(character: Character) {
 
             Spacer(modifier = Modifier.width(16.dp))
 
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = character.name,
                     style = MaterialTheme.typography.titleMedium,
@@ -160,11 +286,16 @@ fun CharacterCard(character: Character) {
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    val dotColor = when (character.status) {
+                        "Alive" -> Color(0xFF4CAF50)
+                        "Dead" -> Color(0xFFE53935)
+                        else -> Color.Gray
+                    }
                     Box(
                         modifier = Modifier
                             .size(8.dp)
                             .clip(CircleShape)
-                            .background(if (character.status == "Alive") Color(0xFF4CAF50) else Color.Gray)
+                            .background(dotColor)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
