@@ -1,5 +1,6 @@
 package com.example.rickandmortyexplorer
 
+import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -29,7 +30,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -38,11 +41,13 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.rickandmortyexplorer.ui.theme.RickAndMortyExplorerTheme
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
-// 1. Модель персонажа з полями для екрана деталей
 data class Character(
     val id: Int,
     val name: String,
@@ -55,7 +60,6 @@ data class Character(
     @DrawableRes val imageRes: Int
 )
 
-// Тестовий список
 val sampleCharacters = listOf(
     Character(
         id = 1,
@@ -125,7 +129,6 @@ val sampleCharacters = listOf(
     )
 )
 
-// 2. Стан UI
 data class CharactersUiState(
     val allCharacters: List<Character> = emptyList(),
     val categories: List<String> = listOf("Всі", "Alive", "Dead", "unknown"),
@@ -139,16 +142,30 @@ data class CharactersUiState(
         }
 }
 
-// 3. ViewModel
-class CharactersViewModel : ViewModel() {
+class CharactersViewModel(application: Application) : AndroidViewModel(application) {
+    private val settingsManager = SettingsManager(application)
+
     private val _uiState = MutableStateFlow(
         CharactersUiState(allCharacters = sampleCharacters)
     )
     val uiState: StateFlow<CharactersUiState> = _uiState.asStateFlow()
 
+    val showExtendedDetails: StateFlow<Boolean> = settingsManager.showExtendedDetailsFlow
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = false
+        )
+
     fun onStatusSelected(newStatus: String) {
         _uiState.update { currentState ->
             currentState.copy(selectedStatus = newStatus)
+        }
+    }
+
+    fun toggleExtendedDetails(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsManager.setExtendedDetails(enabled)
         }
     }
 
@@ -168,12 +185,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// 4. Навігація через NavHost
 @Composable
-fun AppNavigation(
-    viewModel: CharactersViewModel = viewModel()
-) {
+fun AppNavigation() {
     val navController = rememberNavController()
+    // Получаем ViewModel с использованием фабрики AndroidViewModel
+    val viewModel: CharactersViewModel = viewModel(
+        factory = ViewModelProvider.AndroidViewModelFactory.getInstance(
+            androidx.compose.ui.platform.LocalContext.current.applicationContext as Application
+        )
+    )
 
     NavHost(
         navController = navController,
@@ -184,6 +204,9 @@ fun AppNavigation(
                 viewModel = viewModel,
                 onCharacterClick = { characterId ->
                     navController.navigate("detail/$characterId")
+                },
+                onSettingsClick = {
+                    navController.navigate("settings")
                 }
             )
         }
@@ -202,17 +225,25 @@ fun AppNavigation(
                 onBackClick = { navController.popBackStack() }
             )
         }
+
+        composable("settings") {
+            SettingsScreen(
+                viewModel = viewModel,
+                onBackClick = { navController.popBackStack() }
+            )
+        }
     }
 }
 
-// 5. Екран списку (Каталог)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CharactersCatalogScreen(
     viewModel: CharactersViewModel,
-    onCharacterClick: (Int) -> Unit
+    onCharacterClick: (Int) -> Unit,
+    onSettingsClick: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val showExtended by viewModel.showExtendedDetails.collectAsState()
 
     Scaffold(
         topBar = {
@@ -222,6 +253,11 @@ fun CharactersCatalogScreen(
                         text = "Персонажі Rick & Morty",
                         fontWeight = FontWeight.Bold
                     )
+                },
+                actions = {
+                    IconButton(onClick = onSettingsClick) {
+                        Text(text = "⚙️", fontSize = 20.sp)
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -255,6 +291,7 @@ fun CharactersCatalogScreen(
                     items(uiState.filteredCharacters, key = { it.id }) { character ->
                         CharacterCard(
                             character = character,
+                            showExtended = showExtended,
                             onClick = { onCharacterClick(character.id) }
                         )
                     }
@@ -264,7 +301,192 @@ fun CharactersCatalogScreen(
     }
 }
 
-// 6. Екран деталей персонажа
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(
+    viewModel: CharactersViewModel,
+    onBackClick: () -> Unit
+) {
+    val showExtended by viewModel.showExtendedDetails.collectAsState()
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text("Налаштування", fontWeight = FontWeight.Bold)
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBackClick) {
+                        Text(text = "←", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(16.dp)
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Розширений показ у списку",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Показувати рідну планету та кількість серій прямо на картці списку",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+
+                    Switch(
+                        checked = showExtended,
+                        onCheckedChange = { isChecked ->
+                            viewModel.toggleExtendedDetails(isChecked)
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CharacterCard(
+    character: Character,
+    showExtended: Boolean,
+    onClick: () -> Unit
+) {
+    ElevatedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(if (showExtended) 110.dp else 96.dp)
+                    .clip(RoundedCornerShape(12.dp))
+            ) {
+                Image(
+                    painter = painterResource(id = character.imageRes),
+                    contentDescription = character.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                val badgeColor = when (character.status) {
+                    "Alive" -> Color(0xFF2E7D32)
+                    "Dead" -> Color(0xFFC62828)
+                    else -> Color.Gray
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(topStart = 8.dp),
+                    color = badgeColor,
+                    modifier = Modifier.align(Alignment.BottomEnd)
+                ) {
+                    Text(
+                        text = character.status,
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = character.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val dotColor = when (character.status) {
+                        "Alive" -> Color(0xFF4CAF50)
+                        "Dead" -> Color(0xFFE53935)
+                        else -> Color.Gray
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(dotColor)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "${character.status} - ${character.species}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(2.dp))
+
+                Text(
+                    text = "Стать: ${character.gender}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+
+                if (showExtended) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "🪐 ${character.origin}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "🎬 ${character.episodeCount} серій",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            }
+
+            IconButton(onClick = { }) {
+                Text(text = "🤍", fontSize = 20.sp)
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CharacterDetailScreen(
@@ -472,106 +694,6 @@ fun EmptyStateView(status: String) {
                 color = MaterialTheme.colorScheme.outline,
                 textAlign = TextAlign.Center
             )
-        }
-    }
-}
-
-@Composable
-fun CharacterCard(
-    character: Character,
-    onClick: () -> Unit
-) {
-    ElevatedCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(96.dp)
-                    .clip(RoundedCornerShape(12.dp))
-            ) {
-                Image(
-                    painter = painterResource(id = character.imageRes),
-                    contentDescription = character.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-
-                val badgeColor = when (character.status) {
-                    "Alive" -> Color(0xFF2E7D32)
-                    "Dead" -> Color(0xFFC62828)
-                    else -> Color.Gray
-                }
-
-                Surface(
-                    shape = RoundedCornerShape(topStart = 8.dp),
-                    color = badgeColor,
-                    modifier = Modifier.align(Alignment.BottomEnd)
-                ) {
-                    Text(
-                        text = character.status,
-                        color = Color.White,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(16.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = character.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val dotColor = when (character.status) {
-                        "Alive" -> Color(0xFF4CAF50)
-                        "Dead" -> Color(0xFFE53935)
-                        else -> Color.Gray
-                    }
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(dotColor)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "${character.status} - ${character.species}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                Text(
-                    text = "Стать: ${character.gender}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline
-                )
-            }
-
-            IconButton(onClick = { /* дія для обраного */ }) {
-                Text(text = "🤍", fontSize = 20.sp)
-            }
         }
     }
 }
