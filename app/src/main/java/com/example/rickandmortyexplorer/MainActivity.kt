@@ -14,7 +14,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,8 +27,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.rickandmortyexplorer.ui.theme.RickAndMortyExplorerTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
+// 1. Модель даних персонажа
 data class Character(
     val id: Int,
     val name: String,
@@ -36,82 +45,68 @@ data class Character(
     @DrawableRes val imageRes: Int
 )
 
+// Тестовий датасет
 val sampleCharacters = listOf(
-    Character(
-        id = 1,
-        name = "Rick Sanchez",
-        status = "Alive",
-        species = "Human",
-        gender = "Male",
-        imageRes = R.drawable.rick
-    ),
-    Character(
-        id = 2,
-        name = "Morty Smith",
-        status = "Alive",
-        species = "Human",
-        gender = "Male",
-        imageRes = R.drawable.morty
-    ),
-    Character(
-        id = 3,
-        name = "Summer Smith",
-        status = "Alive",
-        species = "Human",
-        gender = "Female",
-        imageRes = R.drawable.summer
-    ),
-    Character(
-        id = 4,
-        name = "Krombopulos Michael",
-        status = "Dead",
-        species = "Gromflomite",
-        gender = "Male",
-        imageRes = R.drawable.rick
-    ),
-    Character(
-        id = 5,
-        name = "Talking Cat",
-        status = "unknown",
-        species = "Animal",
-        gender = "Male",
-        imageRes = R.drawable.morty
-    ),
-    Character(
-        id = 6,
-        name = "Abradolf Lincler",
-        status = "Dead",
-        species = "Human / Genetic Experiment",
-        gender = "Male",
-        imageRes = R.drawable.summer
-    )
+    Character(1, "Rick Sanchez", "Alive", "Human", "Male", R.drawable.rick),
+    Character(2, "Morty Smith", "Alive", "Human", "Male", R.drawable.morty),
+    Character(3, "Summer Smith", "Alive", "Human", "Female", R.drawable.summer),
+    Character(4, "Krombopulos Michael", "Dead", "Gromflomite", "Male", R.drawable.rick),
+    Character(5, "Talking Cat", "unknown", "Animal", "Male", R.drawable.morty),
+    Character(6, "Abradolf Lincler", "Dead", "Human / Genetic Experiment", "Male", R.drawable.summer)
 )
+
+// 2. Стан екрана окремим data class з полями val (Незмінний/Immutable)
+data class CharactersUiState(
+    val allCharacters: List<Character> = emptyList(),
+    val categories: List<String> = listOf("Всі", "Alive", "Dead", "unknown"),
+    val selectedStatus: String = "Всі"
+) {
+    // Обчислювальне поле для відфільтрованого списку
+    val filteredCharacters: List<Character>
+        get() = if (selectedStatus == "Всі") {
+            allCharacters
+        } else {
+            allCharacters.filter { it.status.equals(selectedStatus, ignoreCase = true) }
+        }
+}
+
+// 3. ViewModel: тримає стан і закриває його від прямого запису
+class CharactersViewModel : ViewModel() {
+    // Приватний змінюваний стан
+    private val _uiState = MutableStateFlow(
+        CharactersUiState(allCharacters = sampleCharacters)
+    )
+    // Публічний незмінний стан для UI
+    val uiState: StateFlow<CharactersUiState> = _uiState.asStateFlow()
+
+    // Функція-подія для оновлення стану через copy()
+    fun onStatusSelected(newStatus: String) {
+        _uiState.update { currentState ->
+            currentState.copy(selectedStatus = newStatus)
+        }
+    }
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             RickAndMortyExplorerTheme {
+                // Штатний виклик екрана
                 CharactersCatalogScreen()
             }
         }
     }
 }
 
+// 4. Composable-екран: отримує ViewModel штатним способом (через viewModel())
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CharactersCatalogScreen() {
-    val filterCategories = listOf("Всі", "Alive", "Dead", "unknown")
-
-    var selectedStatus by remember { mutableStateOf("Всі") }
-
-    val filteredCharacters = remember(selectedStatus) {
-        if (selectedStatus == "Всі") {
-            sampleCharacters
-        } else {
-            sampleCharacters.filter { it.status.equals(selectedStatus, ignoreCase = true) }
-        }
-    }
+fun CharactersCatalogScreen(
+    viewModel: CharactersViewModel = viewModel()
+) {
+    // Підписка на StateFlow через collectAsState (без жодного remember для стану фільтра)
+    val uiState by viewModel.uiState.collectAsState()
 
     Scaffold(
         topBar = {
@@ -135,14 +130,16 @@ fun CharactersCatalogScreen() {
                 .padding(innerPadding)
         ) {
             StatusFilterRow(
-                categories = filterCategories,
-                selectedCategory = selectedStatus,
-                onCategorySelected = { newCategory ->
-                    selectedStatus = newCategory
+                categories = uiState.categories,
+                selectedCategory = uiState.selectedStatus,
+                onCategorySelected = { newStatus ->
+                    // Виклик функції-події у ViewModel
+                    viewModel.onStatusSelected(newStatus)
                 }
             )
-            if (filteredCharacters.isEmpty()) {
-                EmptyStateView(status = selectedStatus)
+
+            if (uiState.filteredCharacters.isEmpty()) {
+                EmptyStateView(status = uiState.selectedStatus)
             } else {
                 LazyColumn(
                     modifier = Modifier
@@ -150,7 +147,7 @@ fun CharactersCatalogScreen() {
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(filteredCharacters, key = { it.id }) { character ->
+                    items(uiState.filteredCharacters, key = { it.id }) { character ->
                         CharacterCard(character = character)
                     }
                 }
@@ -205,10 +202,7 @@ fun EmptyStateView(status: String) {
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "🔍",
-                fontSize = 48.sp
-            )
+            Text(text = "🔍", fontSize = 48.sp)
             Spacer(modifier = Modifier.height(12.dp))
             Text(
                 text = "Персонажів не знайдено",
@@ -314,7 +308,7 @@ fun CharacterCard(character: Character) {
                 )
             }
 
-            IconButton(onClick = { }) {
+            IconButton(onClick = { /* дія для обраного */ }) {
                 Text(text = "🤍", fontSize = 20.sp)
             }
         }
