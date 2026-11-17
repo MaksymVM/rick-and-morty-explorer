@@ -4,8 +4,6 @@ import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.annotation.DrawableRes
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -16,16 +14,26 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Category
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Person
+import androidx.compose.material.icons.outlined.Place
+import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Tv
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -39,7 +47,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.rickandmortyexplorer.network.RetrofitClient
+import com.example.rickandmortyexplorer.network.toCharacter
 import com.example.rickandmortyexplorer.ui.theme.RickAndMortyExplorerTheme
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -57,98 +69,25 @@ data class Character(
     val origin: String,
     val location: String,
     val episodeCount: Int,
-    @DrawableRes val imageRes: Int
-)
-
-val sampleCharacters = listOf(
-    Character(
-        id = 1,
-        name = "Rick Sanchez",
-        status = "Alive",
-        species = "Human",
-        gender = "Male",
-        origin = "Earth (C-137)",
-        location = "Citadel of Ricks",
-        episodeCount = 51,
-        imageRes = R.drawable.rick
-    ),
-    Character(
-        id = 2,
-        name = "Morty Smith",
-        status = "Alive",
-        species = "Human",
-        gender = "Male",
-        origin = "Earth (C-137)",
-        location = "Citadel of Ricks",
-        episodeCount = 51,
-        imageRes = R.drawable.morty
-    ),
-    Character(
-        id = 3,
-        name = "Summer Smith",
-        status = "Alive",
-        species = "Human",
-        gender = "Female",
-        origin = "Earth (Replacement Dimension)",
-        location = "Earth (Replacement Dimension)",
-        episodeCount = 42,
-        imageRes = R.drawable.summer
-    ),
-    Character(
-        id = 4,
-        name = "Krombopulos Michael",
-        status = "Dead",
-        species = "Gromflomite",
-        gender = "Male",
-        origin = "Gromflom Prime",
-        location = "Gromflom Prime",
-        episodeCount = 2,
-        imageRes = R.drawable.rick
-    ),
-    Character(
-        id = 5,
-        name = "Talking Cat",
-        status = "unknown",
-        species = "Animal",
-        gender = "Male",
-        origin = "Florida",
-        location = "Earth (Replacement Dimension)",
-        episodeCount = 1,
-        imageRes = R.drawable.morty
-    ),
-    Character(
-        id = 6,
-        name = "Abradolf Lincler",
-        status = "Dead",
-        species = "Human / Experiment",
-        gender = "Male",
-        origin = "Earth (Replacement Dimension)",
-        location = "Testicle Monster Dimension",
-        episodeCount = 2,
-        imageRes = R.drawable.summer
-    )
+    val imageUrl: String = ""
 )
 
 data class CharactersUiState(
-    val allCharacters: List<Character> = emptyList(),
+    val characters: List<Character> = emptyList(),
     val categories: List<String> = listOf("Всі", "Alive", "Dead", "unknown"),
-    val selectedStatus: String = "Всі"
-) {
-    val filteredCharacters: List<Character>
-        get() = if (selectedStatus == "Всі") {
-            allCharacters
-        } else {
-            allCharacters.filter { it.status.equals(selectedStatus, ignoreCase = true) }
-        }
-}
+    val selectedStatus: String = "Всі",
+    val isLoading: Boolean = false,
+    val selectedCharacter: Character? = null,
+    val isDetailLoading: Boolean = false
+)
 
 class CharactersViewModel(application: Application) : AndroidViewModel(application) {
     private val settingsManager = SettingsManager(application)
 
-    private val _uiState = MutableStateFlow(
-        CharactersUiState(allCharacters = sampleCharacters)
-    )
+    private val _uiState = MutableStateFlow(CharactersUiState())
     val uiState: StateFlow<CharactersUiState> = _uiState.asStateFlow()
+
+    private var fetchJob: Job? = null
 
     val showExtendedDetails: StateFlow<Boolean> = settingsManager.showExtendedDetailsFlow
         .stateIn(
@@ -157,9 +96,73 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
             initialValue = false
         )
 
+    init {
+        loadCharacters(_uiState.value.selectedStatus)
+    }
+
     fun onStatusSelected(newStatus: String) {
+        if (newStatus == _uiState.value.selectedStatus && _uiState.value.characters.isNotEmpty()) {
+            return
+        }
         _uiState.update { currentState ->
             currentState.copy(selectedStatus = newStatus)
+        }
+        loadCharacters(newStatus)
+    }
+
+    private fun loadCharacters(status: String) {
+        fetchJob?.cancel()
+        fetchJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true) }
+            try {
+                val queryStatus = if (status == "Всі") null else status.lowercase()
+                val response = RetrofitClient.api.getCharacters(status = queryStatus)
+                val loadedCharacters = response.results.orEmpty().map { it.toCharacter() }
+                _uiState.update {
+                    it.copy(
+                        characters = loadedCharacters,
+                        isLoading = false
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _uiState.update {
+                    it.copy(
+                        characters = emptyList(),
+                        isLoading = false
+                    )
+                }
+            }
+        }
+    }
+
+    fun loadCharacterById(id: Int) {
+        val existing = _uiState.value.characters.find { it.id == id }
+        if (existing != null) {
+            _uiState.update { it.copy(selectedCharacter = existing, isDetailLoading = false) }
+            return
+        }
+        viewModelScope.launch {
+            _uiState.update { it.copy(selectedCharacter = null, isDetailLoading = true) }
+            try {
+                val dto = RetrofitClient.api.getCharacterById(id)
+                _uiState.update {
+                    it.copy(
+                        selectedCharacter = dto.toCharacter(),
+                        isDetailLoading = false
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                _uiState.update {
+                    it.copy(
+                        selectedCharacter = null,
+                        isDetailLoading = false
+                    )
+                }
+            }
         }
     }
 
@@ -167,10 +170,6 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             settingsManager.setExtendedDetails(enabled)
         }
-    }
-
-    fun getCharacterById(id: Int): Character? {
-        return _uiState.value.allCharacters.find { it.id == id }
     }
 }
 
@@ -218,10 +217,19 @@ fun AppNavigation() {
             )
         ) { backStackEntry ->
             val characterId = backStackEntry.arguments?.getInt("characterId") ?: -1
-            val character = viewModel.getCharacterById(characterId)
+            val uiState by viewModel.uiState.collectAsState()
+            val character = uiState.characters.find { it.id == characterId }
+                ?: uiState.selectedCharacter?.takeIf { it.id == characterId }
+
+            LaunchedEffect(characterId) {
+                if (character == null && characterId != -1) {
+                    viewModel.loadCharacterById(characterId)
+                }
+            }
 
             CharacterDetailScreen(
                 character = character,
+                isLoading = uiState.isDetailLoading && character == null,
                 onBackClick = { navController.popBackStack() }
             )
         }
@@ -256,7 +264,10 @@ fun CharactersCatalogScreen(
                 },
                 actions = {
                     IconButton(onClick = onSettingsClick) {
-                        Text(text = "⚙️", fontSize = 20.sp)
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Налаштування"
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -279,21 +290,32 @@ fun CharactersCatalogScreen(
                 }
             )
 
-            if (uiState.filteredCharacters.isEmpty()) {
-                EmptyStateView(status = uiState.selectedStatus)
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    items(uiState.filteredCharacters, key = { it.id }) { character ->
-                        CharacterCard(
-                            character = character,
-                            showExtended = showExtended,
-                            onClick = { onCharacterClick(character.id) }
-                        )
+            when {
+                uiState.isLoading -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+                uiState.characters.isEmpty() -> {
+                    EmptyStateView(status = uiState.selectedStatus)
+                }
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(uiState.characters, key = { it.id }) { character ->
+                            CharacterCard(
+                                character = character,
+                                showExtended = showExtended,
+                                onClick = { onCharacterClick(character.id) }
+                            )
+                        }
                     }
                 }
             }
@@ -317,7 +339,10 @@ fun SettingsScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
-                        Text(text = "←", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Назад"
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -397,12 +422,14 @@ fun CharacterCard(
                 modifier = Modifier
                     .size(if (showExtended) 110.dp else 96.dp)
                     .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
             ) {
-                Image(
-                    painter = painterResource(id = character.imageRes),
+                Icon(
+                    imageVector = Icons.Outlined.Person,
                     contentDescription = character.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.size(44.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
                 val badgeColor = when (character.status) {
@@ -466,22 +493,49 @@ fun CharacterCard(
                 )
 
                 if (showExtended) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "🪐 ${character.origin}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "🎬 ${character.episodeCount} серій",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.secondary
-                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Public,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = character.origin,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Tv,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.secondary
+                        )
+                        Text(
+                            text = "${character.episodeCount} серій",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                    }
                 }
             }
 
             IconButton(onClick = { }) {
-                Text(text = "🤍", fontSize = 20.sp)
+                Icon(
+                    imageVector = Icons.Outlined.FavoriteBorder,
+                    contentDescription = "Додати в обране",
+                    tint = MaterialTheme.colorScheme.outline
+                )
             }
         }
     }
@@ -491,6 +545,7 @@ fun CharacterCard(
 @Composable
 fun CharacterDetailScreen(
     character: Character?,
+    isLoading: Boolean = false,
     onBackClick: () -> Unit
 ) {
     Scaffold(
@@ -504,7 +559,10 @@ fun CharacterDetailScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
-                        Text(text = "←", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Назад"
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -514,7 +572,16 @@ fun CharacterDetailScreen(
             )
         }
     ) { innerPadding ->
-        if (character == null) {
+        if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator()
+            }
+        } else if (character == null) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -523,7 +590,12 @@ fun CharacterDetailScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(text = "⚠️", fontSize = 48.sp)
+                    Icon(
+                        imageVector = Icons.Outlined.WarningAmber,
+                        contentDescription = null,
+                        modifier = Modifier.size(56.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = "Персонажа не знайдено",
@@ -549,12 +621,14 @@ fun CharacterDetailScreen(
                     modifier = Modifier
                         .size(240.dp)
                         .clip(RoundedCornerShape(24.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Image(
-                        painter = painterResource(id = character.imageRes),
+                    Icon(
+                        imageVector = Icons.Outlined.Person,
                         contentDescription = character.name,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.size(96.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
                     val badgeColor = when (character.status) {
@@ -597,19 +671,19 @@ fun CharacterDetailScreen(
                     )
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        DetailInfoRow(label = "Вид (Species)", value = character.species)
+                        DetailInfoRow(label = "Вид (Species)", value = character.species, icon = Icons.Outlined.Category)
                         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
-                        DetailInfoRow(label = "Стать (Gender)", value = character.gender)
+                        DetailInfoRow(label = "Стать (Gender)", value = character.gender, icon = Icons.Outlined.Person)
                         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
-                        DetailInfoRow(label = "Походження (Origin)", value = character.origin)
+                        DetailInfoRow(label = "Походження (Origin)", value = character.origin, icon = Icons.Outlined.Public)
                         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
-                        DetailInfoRow(label = "Остання відома локація", value = character.location)
+                        DetailInfoRow(label = "Остання відома локація", value = character.location, icon = Icons.Outlined.Place)
                         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
-                        DetailInfoRow(label = "Кількість епізодів", value = "${character.episodeCount} епізодів")
+                        DetailInfoRow(label = "Кількість епізодів", value = "${character.episodeCount} серій", icon = Icons.Outlined.Tv)
                     }
                 }
             }
@@ -618,19 +692,38 @@ fun CharacterDetailScreen(
 }
 
 @Composable
-fun DetailInfoRow(label: String, value: String) {
-    Column {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.outline
-        )
-        Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyLarge,
-            fontWeight = FontWeight.SemiBold
-        )
+fun DetailInfoRow(
+    label: String,
+    value: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (icon != null) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(24.dp)
+                    .padding(end = 8.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+        Column {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
     }
 }
 
@@ -680,7 +773,12 @@ fun EmptyStateView(status: String) {
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = "🔍", fontSize = 48.sp)
+            Icon(
+                imageVector = Icons.Outlined.Search,
+                contentDescription = null,
+                modifier = Modifier.size(56.dp),
+                tint = MaterialTheme.colorScheme.outline
+            )
             Spacer(modifier = Modifier.height(12.dp))
             Text(
                 text = "Персонажів не знайдено",
