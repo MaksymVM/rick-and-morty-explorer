@@ -23,6 +23,11 @@ interface RickAndMortyApiService {
     suspend fun getCharacterById(
         @Path("id") id: Int
     ): CharacterDto
+
+    @GET("episode/{id}")
+    suspend fun getEpisodeById(
+        @Path("id") id: Int
+    ): EpisodeDto
 }
 
 object RetrofitClient {

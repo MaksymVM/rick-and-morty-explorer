@@ -36,6 +36,7 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Tv
 import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -48,11 +49,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
+import coil.request.ImageRequest
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -69,7 +76,12 @@ import com.example.rickandmortyexplorer.network.toUserErrorMessage
 import com.example.rickandmortyexplorer.ui.theme.RickAndMortyExplorerTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -87,7 +99,9 @@ data class Character(
     val origin: String,
     val location: String,
     val episodeCount: Int,
-    val imageUrl: String = ""
+    val imageUrl: String = "",
+    val firstEpisodeId: Int? = null,
+    val firstEpisode: String = ""
 )
 
 data class CharactersUiState(
@@ -96,7 +110,9 @@ data class CharactersUiState(
     val selectedStatus: String = "Всі",
     val searchQuery: String = "",
     val isLoading: Boolean = false,
+    val isRefreshing: Boolean = false,
     val errorMessage: String? = null,
+    val refreshErrorMessage: String? = null,
     val selectedCharacter: Character? = null,
     val isDetailLoading: Boolean = false,
     val detailErrorMessage: String? = null
@@ -109,6 +125,8 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
     val uiState: StateFlow<CharactersUiState> = _uiState.asStateFlow()
 
     private var fetchJob: Job? = null
+    private val episodeCache = mutableMapOf<Int, String>()
+    private val episodeFetchSemaphore = Semaphore(permits = 4)
 
     val showExtendedDetails: StateFlow<Boolean> = settingsManager.showExtendedDetailsFlow
         .stateIn(
@@ -150,6 +168,20 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
         loadCharacters(status = current.selectedStatus, query = current.searchQuery)
     }
 
+    fun refresh() {
+        val current = _uiState.value
+        if (current.isRefreshing || current.isLoading) return
+        loadCharacters(
+            status = current.selectedStatus,
+            query = current.searchQuery,
+            isPullToRefresh = true
+        )
+    }
+
+    fun consumeRefreshError() {
+        _uiState.update { it.copy(refreshErrorMessage = null) }
+    }
+
     fun resetFilters() {
         _uiState.update { it.copy(selectedStatus = "Всі", searchQuery = "") }
         loadCharacters(status = "Всі", query = "")
@@ -158,14 +190,21 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
     private fun loadCharacters(
         status: String,
         query: String,
-        debounceMs: Long = 0L
+        debounceMs: Long = 0L,
+        isPullToRefresh: Boolean = false
     ) {
         fetchJob?.cancel()
         fetchJob = viewModelScope.launch {
             if (debounceMs > 0L) {
                 delay(debounceMs)
             }
-            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            if (isPullToRefresh) {
+                _uiState.update { it.copy(isRefreshing = true, refreshErrorMessage = null) }
+            } else {
+                _uiState.update {
+                    it.copy(isLoading = true, errorMessage = null, refreshErrorMessage = null)
+                }
+            }
             try {
                 val queryStatus = if (status == "Всі") null else status.lowercase()
                 val queryName = query.trim().takeIf { it.isNotEmpty() }
@@ -176,11 +215,17 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
                 val loadedCharacters = response.results.orEmpty()
                     .map { it.toCharacter() }
                     .distinctBy { it.id }
+                val enrichedCharacters = enrichWithFirstEpisodes(
+                    characters = loadedCharacters,
+                    forceRefresh = isPullToRefresh
+                )
                 _uiState.update {
                     it.copy(
-                        characters = loadedCharacters,
+                        characters = enrichedCharacters,
                         isLoading = false,
-                        errorMessage = null
+                        isRefreshing = false,
+                        errorMessage = null,
+                        refreshErrorMessage = null
                     )
                 }
             } catch (e: CancellationException) {
@@ -191,7 +236,16 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
                         it.copy(
                             characters = emptyList(),
                             isLoading = false,
-                            errorMessage = null
+                            isRefreshing = false,
+                            errorMessage = null,
+                            refreshErrorMessage = null
+                        )
+                    }
+                } else if (isPullToRefresh && _uiState.value.characters.isNotEmpty()) {
+                    _uiState.update {
+                        it.copy(
+                            isRefreshing = false,
+                            refreshErrorMessage = e.toUserErrorMessage()
                         )
                     }
                 } else {
@@ -199,11 +253,53 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
                         it.copy(
                             characters = emptyList(),
                             isLoading = false,
+                            isRefreshing = false,
                             errorMessage = e.toUserErrorMessage()
                         )
                     }
                 }
             }
+        }
+    }
+
+    private suspend fun enrichWithFirstEpisodes(
+        characters: List<Character>,
+        forceRefresh: Boolean = false
+    ): List<Character> {
+        val uniqueEpisodeIds = characters.mapNotNull { it.firstEpisodeId }.distinct()
+        val idsToFetch = if (forceRefresh) {
+            uniqueEpisodeIds
+        } else {
+            uniqueEpisodeIds.filterNot { episodeCache.containsKey(it) }
+        }
+
+        if (idsToFetch.isNotEmpty()) {
+            val fetched = coroutineScope {
+                idsToFetch.map { episodeId ->
+                    async {
+                        episodeFetchSemaphore.withPermit {
+                            try {
+                                val title = RetrofitClient.api.getEpisodeById(episodeId).toDisplayTitle()
+                                episodeId to title
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                null
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+            fetched.filterNotNull().forEach { (episodeId, title) ->
+                if (title.isNotBlank()) {
+                    episodeCache[episodeId] = title
+                }
+            }
+        }
+
+        return characters.map { character ->
+            val episodeTitle = character.firstEpisodeId?.let { episodeCache[it] }.orEmpty()
+            if (episodeTitle.isNotBlank()) character.copy(firstEpisode = episodeTitle) else character
         }
     }
 
@@ -229,9 +325,10 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
             }
             try {
                 val dto = RetrofitClient.api.getCharacterById(id)
+                val enriched = enrichWithFirstEpisodes(listOf(dto.toCharacter())).first()
                 _uiState.update {
                     it.copy(
-                        selectedCharacter = dto.toCharacter(),
+                        selectedCharacter = enriched,
                         isDetailLoading = false,
                         detailErrorMessage = null
                     )
@@ -353,8 +450,16 @@ fun CharactersCatalogScreen(
     val uiState by viewModel.uiState.collectAsState()
     val showExtended by viewModel.showExtendedDetails.collectAsState()
     val listState = rememberLazyListState()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(uiState.refreshErrorMessage) {
+        val message = uiState.refreshErrorMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        viewModel.consumeRefreshError()
+    }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -441,22 +546,28 @@ fun CharactersCatalogScreen(
                     )
                 }
                 else -> {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    PullToRefreshBox(
+                        isRefreshing = uiState.isRefreshing,
+                        onRefresh = { viewModel.refresh() },
+                        modifier = Modifier.fillMaxSize()
                     ) {
-                        items(
-                            items = uiState.characters,
-                            key = { it.id },
-                            contentType = { "character" }
-                        ) { character ->
-                            CharacterCard(
-                                character = character,
-                                showExtended = showExtended,
-                                onClick = { onCharacterClick(character.id) }
-                            )
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(
+                                items = uiState.characters,
+                                key = { it.id },
+                                contentType = { "character" }
+                            ) { character ->
+                                CharacterCard(
+                                    character = character,
+                                    showExtended = showExtended,
+                                    onClick = { onCharacterClick(character.id) }
+                                )
+                            }
                         }
                     }
                 }
@@ -568,11 +679,10 @@ fun CharacterCard(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Outlined.Person,
+                CharacterImage(
+                    imageUrl = character.imageUrl,
                     contentDescription = character.name,
-                    modifier = Modifier.size(44.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    placeholderIconSize = 44.dp
                 )
 
                 val badgeColor = when (character.status) {
@@ -635,6 +745,17 @@ fun CharacterCard(
                     color = MaterialTheme.colorScheme.outline
                 )
 
+                if (character.firstEpisode.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Дебют: ${character.firstEpisode}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
                 if (showExtended) {
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(
@@ -680,6 +801,64 @@ fun CharacterCard(
                     tint = MaterialTheme.colorScheme.outline
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun CharacterImage(
+    imageUrl: String,
+    contentDescription: String,
+    placeholderIconSize: Dp,
+    modifier: Modifier = Modifier
+) {
+    if (imageUrl.isBlank()) {
+        Icon(
+            imageVector = Icons.Outlined.Person,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(placeholderIconSize),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        return
+    }
+
+    val context = LocalContext.current
+    var imageState by remember(imageUrl) {
+        mutableStateOf<AsyncImagePainter.State>(AsyncImagePainter.State.Empty)
+    }
+
+    Box(
+        modifier = modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(imageUrl)
+                .crossfade(true)
+                .build(),
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+            onState = { imageState = it }
+        )
+
+        when (imageState) {
+            is AsyncImagePainter.State.Empty,
+            is AsyncImagePainter.State.Loading -> {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp
+                )
+            }
+            is AsyncImagePainter.State.Error -> {
+                Icon(
+                    imageVector = Icons.Outlined.Person,
+                    contentDescription = contentDescription,
+                    modifier = Modifier.size(placeholderIconSize),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            is AsyncImagePainter.State.Success -> Unit
         }
     }
 }
@@ -805,11 +984,10 @@ fun CharacterDetailScreen(
                             .background(MaterialTheme.colorScheme.surfaceVariant),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Person,
+                        CharacterImage(
+                            imageUrl = character.imageUrl,
                             contentDescription = character.name,
-                            modifier = Modifier.size(96.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            placeholderIconSize = 96.dp
                         )
 
                         val badgeColor = when (character.status) {
@@ -865,6 +1043,10 @@ fun CharacterDetailScreen(
                             HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
                             DetailInfoRow(label = "Кількість епізодів", value = "${character.episodeCount} серій", icon = Icons.Outlined.Tv)
+                            if (character.firstEpisode.isNotBlank()) {
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
+                                DetailInfoRow(label = "Перша поява", value = character.firstEpisode, icon = Icons.Outlined.Tv)
+                            }
                         }
                     }
 
