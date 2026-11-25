@@ -1439,6 +1439,7 @@ fun EmptyFavoritesStateView(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(32.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -1526,6 +1527,7 @@ fun SettingsScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
+                    .verticalScroll(rememberScrollState())
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
@@ -2002,6 +2004,7 @@ fun CharacterDetailScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
+                            .verticalScroll(rememberScrollState())
                             .padding(24.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -2341,6 +2344,7 @@ fun ErrorStateView(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(32.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -2399,6 +2403,7 @@ fun EmptySearchStateView(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(32.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -2452,6 +2457,7 @@ fun EmptyStateView(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(32.dp),
         contentAlignment = Alignment.Center
     ) {

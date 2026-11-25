@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">Rick and Morty Explorer</string>
+    <string name="app_name">Rick &amp; Morty Explorer</string>
     <string name="project_subtitle">Каталог всесвіту «Рік та Морті» з детальним переглядом персонажів та керуванням обраним.</string>
 </resources>

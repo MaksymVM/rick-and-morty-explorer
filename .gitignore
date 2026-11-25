@@ -13,3 +13,6 @@
 local.properties
 .vscode/
 .kotlin/
+*.jks
+*.keystore
+mapping.txt
