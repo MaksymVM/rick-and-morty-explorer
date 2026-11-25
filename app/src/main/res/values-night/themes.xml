@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.RickAndMortyExplorer" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/portal_dark_bg</item>
+    </style>
+
+    <style name="Theme.RickAndMortyExplorer.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/portal_dark_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash_portal</item>
+        <item name="postSplashScreenTheme">@style/Theme.RickAndMortyExplorer</item>
+    </style>
+</resources>

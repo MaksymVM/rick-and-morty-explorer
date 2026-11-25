@@ -15,6 +15,7 @@ import java.net.SocketTimeoutException
 interface RickAndMortyApiService {
     @GET("character")
     suspend fun getCharacters(
+        @Query("page") page: Int? = null,
         @Query("status") status: String? = null,
         @Query("name") name: String? = null
     ): CharactersResponseDto
@@ -33,6 +34,11 @@ interface RickAndMortyApiService {
     suspend fun getEpisodeById(
         @Path("id") id: Int
     ): EpisodeDto
+
+    @GET("episode/{ids}")
+    suspend fun getEpisodesByIds(
+        @Path("ids", encoded = true) ids: String
+    ): List<EpisodeDto>
 }
 
 object RetrofitClient {

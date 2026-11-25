@@ -19,12 +19,18 @@ class SettingsManager(private val context: Context) {
         // Ключ для збереження розширеного відображення деталей
         val SHOW_EXTENDED_DETAILS_KEY = booleanPreferencesKey("show_extended_details")
         val FAVORITE_IDS_KEY = stringSetPreferencesKey("favorite_character_ids")
+        val DARK_THEME_KEY = booleanPreferencesKey("dark_theme_enabled")
     }
 
     // Читання значення як Flow з дефолтним значенням false (для першого запуску)
     val showExtendedDetailsFlow: Flow<Boolean> = context.dataStore.data
         .map { preferences ->
             preferences[SHOW_EXTENDED_DETAILS_KEY] ?: false
+        }
+
+    val darkThemeFlow: Flow<Boolean?> = context.dataStore.data
+        .map { preferences ->
+            preferences[DARK_THEME_KEY]
         }
 
     val favoriteIdsFlow: Flow<Set<Int>> = context.dataStore.data
@@ -39,6 +45,12 @@ class SettingsManager(private val context: Context) {
     suspend fun setExtendedDetails(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[SHOW_EXTENDED_DETAILS_KEY] = enabled
+        }
+    }
+
+    suspend fun setDarkTheme(enabled: Boolean) {
+        context.dataStore.edit { preferences ->
+            preferences[DARK_THEME_KEY] = enabled
         }
     }
 

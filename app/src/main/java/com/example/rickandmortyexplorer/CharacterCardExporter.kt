@@ -8,6 +8,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.media.MediaScannerConnection
@@ -17,6 +19,10 @@ import android.provider.MediaStore
 import android.text.TextPaint
 import android.text.TextUtils
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.toBitmap
+import coil.Coil
+import coil.request.ImageRequest
+import coil.request.SuccessResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -42,7 +48,8 @@ object CharacterCardExporter {
         character: Character
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val bitmap = renderPosterBitmap(character)
+            val avatarBitmap = loadCharacterAvatarBitmap(context, character.imageUrl)
+            val bitmap = renderPosterBitmap(character, avatarBitmap)
             val safeName = character.name
                 .replace(Regex("[^A-Za-zА-Яа-яІіЇїЄєҐґ0-9]+"), "_")
                 .trim('_')
@@ -121,7 +128,25 @@ object CharacterCardExporter {
         }.getOrDefault(0)
     }
 
-    private fun renderPosterBitmap(character: Character): Bitmap {
+    private suspend fun loadCharacterAvatarBitmap(
+        context: Context,
+        imageUrl: String
+    ): Bitmap? {
+        if (imageUrl.isBlank()) return null
+        return runCatching {
+            val request = ImageRequest.Builder(context)
+                .data(imageUrl)
+                .allowHardware(false)
+                .build()
+            val result = Coil.imageLoader(context).execute(request)
+            (result as? SuccessResult)?.drawable?.toBitmap()
+        }.getOrNull()
+    }
+
+    private fun renderPosterBitmap(
+        character: Character,
+        avatarBitmap: Bitmap? = null
+    ): Bitmap {
         val width = 900
         val height = 1220
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -160,29 +185,52 @@ object CharacterCardExporter {
         }
         canvas.drawText("RICK & MORTY EXPLORER • ДОСЬЄ #${character.id}", width / 2f, 125f, headerPaint)
 
-        // Круглий аватар з ініціалами персонажа
+        // Круглий аватар героя (фото або резервні ініціали)
         val avatarCenterY = 280f
+        val avatarRadius = 105f
         val avatarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#334155")
             style = Paint.Style.FILL
         }
-        canvas.drawCircle(width / 2f, avatarCenterY, 105f, avatarPaint)
-        canvas.drawCircle(width / 2f, avatarCenterY, 105f, borderPaint)
+        canvas.drawCircle(width / 2f, avatarCenterY, avatarRadius, avatarPaint)
 
-        val initials = character.name
-            .split(" ")
-            .filter { it.isNotBlank() }
-            .take(2)
-            .joinToString("") { it.first().uppercaseChar().toString() }
-            .ifEmpty { "?" }
+        if (avatarBitmap != null && avatarBitmap.width > 0 && avatarBitmap.height > 0) {
+            val cropSize = minOf(avatarBitmap.width, avatarBitmap.height)
+            val srcLeft = (avatarBitmap.width - cropSize) / 2
+            val srcTop = (avatarBitmap.height - cropSize) / 2
+            val srcRect = Rect(srcLeft, srcTop, srcLeft + cropSize, srcTop + cropSize)
+            val dstRect = RectF(
+                width / 2f - avatarRadius,
+                avatarCenterY - avatarRadius,
+                width / 2f + avatarRadius,
+                avatarCenterY + avatarRadius
+            )
+            val clipPath = Path().apply {
+                addCircle(width / 2f, avatarCenterY, avatarRadius, Path.Direction.CW)
+            }
+            val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            canvas.save()
+            canvas.clipPath(clipPath)
+            canvas.drawBitmap(avatarBitmap, srcRect, dstRect, imagePaint)
+            canvas.restore()
+        } else {
+            val initials = character.name
+                .split(" ")
+                .filter { it.isNotBlank() }
+                .take(2)
+                .joinToString("") { it.first().uppercaseChar().toString() }
+                .ifEmpty { "?" }
 
-        val initialsPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 74f
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            textAlign = Paint.Align.CENTER
+            val initialsPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                textSize = 74f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.CENTER
+            }
+            canvas.drawText(initials, width / 2f, avatarCenterY + 26f, initialsPaint)
         }
-        canvas.drawText(initials, width / 2f, avatarCenterY + 26f, initialsPaint)
+
+        canvas.drawCircle(width / 2f, avatarCenterY, avatarRadius, borderPaint)
 
         // Ім'я персонажа
         val namePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
