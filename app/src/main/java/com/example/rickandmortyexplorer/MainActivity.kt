@@ -15,6 +15,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -172,7 +173,9 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
                     status = queryStatus,
                     name = queryName
                 )
-                val loadedCharacters = response.results.orEmpty().map { it.toCharacter() }
+                val loadedCharacters = response.results.orEmpty()
+                    .map { it.toCharacter() }
+                    .distinctBy { it.id }
                 _uiState.update {
                     it.copy(
                         characters = loadedCharacters,
@@ -349,6 +352,7 @@ fun CharactersCatalogScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val showExtended by viewModel.showExtendedDetails.collectAsState()
+    val listState = rememberLazyListState()
 
     Scaffold(
         topBar = {
@@ -438,12 +442,16 @@ fun CharactersCatalogScreen(
                 }
                 else -> {
                     LazyColumn(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        items(uiState.characters, key = { it.id }) { character ->
+                        items(
+                            items = uiState.characters,
+                            key = { it.id },
+                            contentType = { "character" }
+                        ) { character ->
                             CharacterCard(
                                 character = character,
                                 showExtended = showExtended,
@@ -535,10 +543,11 @@ fun SettingsScreen(
 fun CharacterCard(
     character: Character,
     showExtended: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     ElevatedCard(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(16.dp),
