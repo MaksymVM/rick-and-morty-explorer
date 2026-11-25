@@ -22,12 +22,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Category
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Place
 import androidx.compose.material.icons.outlined.Public
@@ -86,6 +89,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -115,7 +119,10 @@ data class CharactersUiState(
     val refreshErrorMessage: String? = null,
     val selectedCharacter: Character? = null,
     val isDetailLoading: Boolean = false,
-    val detailErrorMessage: String? = null
+    val detailErrorMessage: String? = null,
+    val favoriteCharacters: List<Character> = emptyList(),
+    val isFavoritesLoading: Boolean = false,
+    val favoritesErrorMessage: String? = null
 )
 
 class CharactersViewModel(application: Application) : AndroidViewModel(application) {
@@ -125,6 +132,7 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
     val uiState: StateFlow<CharactersUiState> = _uiState.asStateFlow()
 
     private var fetchJob: Job? = null
+    private var favoritesJob: Job? = null
     private val episodeCache = mutableMapOf<Int, String>()
     private val catalogCache = mutableMapOf<String, List<Character>>()
     private val episodeFetchSemaphore = Semaphore(permits = 4)
@@ -134,6 +142,13 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
             scope = viewModelScope,
             started = SharingStarted.Eagerly,
             initialValue = false
+        )
+
+    val favoriteIds: StateFlow<Set<Int>> = settingsManager.favoriteIdsFlow
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = emptySet()
         )
 
     init {
@@ -348,6 +363,7 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
 
     fun loadCharacterById(id: Int) {
         val existing = _uiState.value.characters.find { it.id == id }
+            ?: _uiState.value.favoriteCharacters.find { it.id == id }
         if (existing != null) {
             _uiState.update {
                 it.copy(
@@ -405,6 +421,75 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
             settingsManager.setExtendedDetails(enabled)
         }
     }
+
+    fun toggleFavorite(characterId: Int) {
+        val wasFavorite = characterId in favoriteIds.value
+        viewModelScope.launch {
+            settingsManager.toggleFavorite(characterId)
+            if (wasFavorite) {
+                _uiState.update { state ->
+                    state.copy(
+                        favoriteCharacters = state.favoriteCharacters.filterNot { it.id == characterId }
+                    )
+                }
+            }
+        }
+    }
+
+    fun loadFavorites() {
+        favoritesJob?.cancel()
+        favoritesJob = viewModelScope.launch {
+            _uiState.update { it.copy(isFavoritesLoading = true, favoritesErrorMessage = null) }
+            try {
+                val savedIds = settingsManager.favoriteIdsFlow.first().sorted()
+                if (savedIds.isEmpty()) {
+                    _uiState.update {
+                        it.copy(
+                            favoriteCharacters = emptyList(),
+                            isFavoritesLoading = false,
+                            favoritesErrorMessage = null
+                        )
+                    }
+                    return@launch
+                }
+                val loadedDtos = if (savedIds.size == 1) {
+                    listOf(RetrofitClient.api.getCharacterById(savedIds.first()))
+                } else {
+                    RetrofitClient.api.getCharactersByIds(savedIds.joinToString(","))
+                }
+                val loadedCharacters = loadedDtos
+                    .map { it.toCharacter() }
+                    .distinctBy { it.id }
+                val enriched = enrichWithFirstEpisodes(loadedCharacters)
+                _uiState.update {
+                    it.copy(
+                        favoriteCharacters = enriched,
+                        isFavoritesLoading = false,
+                        favoritesErrorMessage = null
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (e.isEmptyApiResult()) {
+                    _uiState.update {
+                        it.copy(
+                            favoriteCharacters = emptyList(),
+                            isFavoritesLoading = false,
+                            favoritesErrorMessage = null
+                        )
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            isFavoritesLoading = false,
+                            favoritesErrorMessage = e.toUserErrorMessage()
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 class MainActivity : ComponentActivity() {
@@ -427,6 +512,22 @@ fun AppNavigation() {
             LocalContext.current.applicationContext as Application
         )
     )
+    val favoriteIds by viewModel.favoriteIds.collectAsState()
+
+    val navigateToCatalog: () -> Unit = {
+        navController.navigate("catalog") {
+            popUpTo("catalog") { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
+    val navigateToFavorites: () -> Unit = {
+        navController.navigate("favorites") {
+            popUpTo("catalog") { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
 
     NavHost(
         navController = navController,
@@ -438,8 +539,35 @@ fun AppNavigation() {
                 onCharacterClick = { characterId ->
                     navController.navigate("detail/$characterId")
                 },
+                onFavoritesClick = navigateToFavorites,
                 onSettingsClick = {
                     navController.navigate("settings")
+                },
+                bottomBar = {
+                    CatalogBottomBar(
+                        currentRoute = "catalog",
+                        favoritesCount = favoriteIds.size,
+                        onCatalogClick = navigateToCatalog,
+                        onFavoritesClick = navigateToFavorites
+                    )
+                }
+            )
+        }
+
+        composable("favorites") {
+            FavoritesScreen(
+                viewModel = viewModel,
+                onCharacterClick = { characterId ->
+                    navController.navigate("detail/$characterId")
+                },
+                onExploreClick = navigateToCatalog,
+                bottomBar = {
+                    CatalogBottomBar(
+                        currentRoute = "favorites",
+                        favoritesCount = favoriteIds.size,
+                        onCatalogClick = navigateToCatalog,
+                        onFavoritesClick = navigateToFavorites
+                    )
                 }
             )
         }
@@ -453,6 +581,7 @@ fun AppNavigation() {
             val characterId = backStackEntry.arguments?.getInt("characterId") ?: -1
             val uiState by viewModel.uiState.collectAsState()
             val character = uiState.characters.find { it.id == characterId }
+                ?: uiState.favoriteCharacters.find { it.id == characterId }
                 ?: uiState.selectedCharacter?.takeIf { it.id == characterId }
 
             LaunchedEffect(characterId) {
@@ -463,6 +592,12 @@ fun AppNavigation() {
 
             CharacterDetailScreen(
                 character = character,
+                isFavorite = characterId in favoriteIds,
+                onFavoriteClick = {
+                    if (characterId != -1) {
+                        viewModel.toggleFavorite(characterId)
+                    }
+                },
                 isLoading = uiState.isDetailLoading && character == null,
                 errorMessage = uiState.detailErrorMessage,
                 onRetry = {
@@ -483,15 +618,59 @@ fun AppNavigation() {
     }
 }
 
+@Composable
+fun CatalogBottomBar(
+    currentRoute: String,
+    favoritesCount: Int,
+    onCatalogClick: () -> Unit,
+    onFavoritesClick: () -> Unit
+) {
+    NavigationBar {
+        val isCatalogSelected = currentRoute == "catalog"
+        val isFavoritesSelected = currentRoute == "favorites"
+
+        NavigationBarItem(
+            selected = isCatalogSelected,
+            onClick = onCatalogClick,
+            icon = {
+                Icon(
+                    imageVector = if (isCatalogSelected) Icons.Filled.Home else Icons.Outlined.Home,
+                    contentDescription = "Каталог"
+                )
+            },
+            label = { Text("Каталог") }
+        )
+
+        NavigationBarItem(
+            selected = isFavoritesSelected,
+            onClick = onFavoritesClick,
+            icon = {
+                Icon(
+                    imageVector = if (isFavoritesSelected) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                    contentDescription = "Обране"
+                )
+            },
+            label = {
+                Text(
+                    if (favoritesCount > 0) "Обране ($favoritesCount)" else "Обране"
+                )
+            }
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CharactersCatalogScreen(
     viewModel: CharactersViewModel,
     onCharacterClick: (Int) -> Unit,
-    onSettingsClick: () -> Unit
+    onFavoritesClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    bottomBar: @Composable () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val showExtended by viewModel.showExtendedDetails.collectAsState()
+    val favoriteIds by viewModel.favoriteIds.collectAsState()
     val listState = rememberLazyListState()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -503,6 +682,7 @@ fun CharactersCatalogScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = bottomBar,
         topBar = {
             TopAppBar(
                 title = {
@@ -512,6 +692,16 @@ fun CharactersCatalogScreen(
                     )
                 },
                 actions = {
+                    IconButton(onClick = onFavoritesClick) {
+                        Icon(
+                            imageVector = if (favoriteIds.isNotEmpty()) {
+                                Icons.Filled.Favorite
+                            } else {
+                                Icons.Outlined.FavoriteBorder
+                            },
+                            contentDescription = "Обране"
+                        )
+                    }
                     IconButton(onClick = onSettingsClick) {
                         Icon(
                             imageVector = Icons.Default.Settings,
@@ -615,12 +805,134 @@ fun CharactersCatalogScreen(
                                 CharacterCard(
                                     character = character,
                                     showExtended = showExtended,
+                                    isFavorite = character.id in favoriteIds,
+                                    onFavoriteClick = { viewModel.toggleFavorite(character.id) },
                                     onClick = { onCharacterClick(character.id) }
                                 )
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FavoritesScreen(
+    viewModel: CharactersViewModel,
+    onCharacterClick: (Int) -> Unit,
+    onExploreClick: () -> Unit,
+    bottomBar: @Composable () -> Unit = {}
+) {
+    val uiState by viewModel.uiState.collectAsState()
+    val showExtended by viewModel.showExtendedDetails.collectAsState()
+    val favoriteIds by viewModel.favoriteIds.collectAsState()
+
+    LaunchedEffect(Unit) {
+        viewModel.loadFavorites()
+    }
+
+    Scaffold(
+        bottomBar = bottomBar,
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = "Обране",
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            )
+        }
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            when {
+                uiState.isFavoritesLoading -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+                uiState.favoritesErrorMessage != null -> {
+                    ErrorStateView(
+                        message = uiState.favoritesErrorMessage!!,
+                        onRetry = { viewModel.loadFavorites() }
+                    )
+                }
+                uiState.favoriteCharacters.isEmpty() -> {
+                    EmptyFavoritesStateView(onExploreClick = onExploreClick)
+                }
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(
+                            items = uiState.favoriteCharacters,
+                            key = { it.id },
+                            contentType = { "character" }
+                        ) { character ->
+                            CharacterCard(
+                                character = character,
+                                showExtended = showExtended,
+                                isFavorite = character.id in favoriteIds,
+                                onFavoriteClick = { viewModel.toggleFavorite(character.id) },
+                                onClick = { onCharacterClick(character.id) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EmptyFavoritesStateView(
+    onExploreClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = Icons.Outlined.FavoriteBorder,
+                contentDescription = null,
+                modifier = Modifier.size(56.dp),
+                tint = MaterialTheme.colorScheme.outline
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Добірка порожня",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Натисніть на сердечко в каталозі або на екрані персонажа, щоб зберегти його сюди.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.outline,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            OutlinedButton(onClick = onExploreClick) {
+                Text("Перейти до каталогу")
             }
         }
     }
@@ -705,7 +1017,9 @@ fun CharacterCard(
     character: Character,
     showExtended: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isFavorite: Boolean = false,
+    onFavoriteClick: () -> Unit = {}
 ) {
     ElevatedCard(
         modifier = modifier
@@ -844,11 +1158,19 @@ fun CharacterCard(
                 }
             }
 
-            IconButton(onClick = { }) {
+            IconButton(onClick = onFavoriteClick) {
                 Icon(
-                    imageVector = Icons.Outlined.FavoriteBorder,
-                    contentDescription = "Додати в обране",
-                    tint = MaterialTheme.colorScheme.outline
+                    imageVector = if (isFavorite) {
+                        Icons.Filled.Favorite
+                    } else {
+                        Icons.Outlined.FavoriteBorder
+                    },
+                    contentDescription = if (isFavorite) "Прибрати з обраного" else "Додати в обране",
+                    tint = if (isFavorite) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.outline
+                    }
                 )
             }
         }
@@ -917,6 +1239,8 @@ fun CharacterImage(
 @Composable
 fun CharacterDetailScreen(
     character: Character?,
+    isFavorite: Boolean = false,
+    onFavoriteClick: () -> Unit = {},
     isLoading: Boolean = false,
     errorMessage: String? = null,
     onRetry: () -> Unit = {},
@@ -962,6 +1286,29 @@ fun CharacterDetailScreen(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Назад"
                         )
+                    }
+                },
+                actions = {
+                    if (character != null) {
+                        IconButton(onClick = onFavoriteClick) {
+                            Icon(
+                                imageVector = if (isFavorite) {
+                                    Icons.Filled.Favorite
+                                } else {
+                                    Icons.Outlined.FavoriteBorder
+                                },
+                                contentDescription = if (isFavorite) {
+                                    "Прибрати з обраного"
+                                } else {
+                                    "Додати в обране"
+                                },
+                                tint = if (isFavorite) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    LocalContentColor.current
+                                }
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(

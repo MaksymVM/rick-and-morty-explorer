@@ -24,6 +24,11 @@ interface RickAndMortyApiService {
         @Path("id") id: Int
     ): CharacterDto
 
+    @GET("character/{ids}")
+    suspend fun getCharactersByIds(
+        @Path("ids", encoded = true) ids: String
+    ): List<CharacterDto>
+
     @GET("episode/{id}")
     suspend fun getEpisodeById(
         @Path("id") id: Int
