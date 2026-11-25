@@ -126,6 +126,7 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
 
     private var fetchJob: Job? = null
     private val episodeCache = mutableMapOf<Int, String>()
+    private val catalogCache = mutableMapOf<String, List<Character>>()
     private val episodeFetchSemaphore = Semaphore(permits = 4)
 
     val showExtendedDetails: StateFlow<Boolean> = settingsManager.showExtendedDetailsFlow
@@ -155,12 +156,51 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun onSearchQueryChanged(newQuery: String) {
+        val current = _uiState.value
+        val previousTrimmed = current.searchQuery.trim()
+        val newTrimmed = newQuery.trim()
+
         _uiState.update { it.copy(searchQuery = newQuery) }
+
+        if (newTrimmed.isEmpty()) {
+            restoreCatalogForCurrentStatus(current.selectedStatus)
+            return
+        }
+
+        if (newTrimmed == previousTrimmed && current.errorMessage == null) {
+            return
+        }
+
         loadCharacters(
-            status = _uiState.value.selectedStatus,
-            query = newQuery,
+            status = current.selectedStatus,
+            query = newTrimmed,
             debounceMs = 350L
         )
+    }
+
+    fun clearSearch() {
+        val current = _uiState.value
+        if (current.searchQuery.isEmpty() && current.errorMessage == null) return
+        _uiState.update { it.copy(searchQuery = "") }
+        restoreCatalogForCurrentStatus(current.selectedStatus)
+    }
+
+    private fun restoreCatalogForCurrentStatus(status: String) {
+        fetchJob?.cancel()
+        val cached = catalogCache[status]
+        if (cached != null) {
+            _uiState.update {
+                it.copy(
+                    characters = cached,
+                    isLoading = false,
+                    isRefreshing = false,
+                    errorMessage = null,
+                    refreshErrorMessage = null
+                )
+            }
+        } else {
+            loadCharacters(status = status, query = "")
+        }
     }
 
     fun retry() {
@@ -219,6 +259,9 @@ class CharactersViewModel(application: Application) : AndroidViewModel(applicati
                     characters = loadedCharacters,
                     forceRefresh = isPullToRefresh
                 )
+                if (queryName == null) {
+                    catalogCache[status] = enrichedCharacters
+                }
                 _uiState.update {
                     it.copy(
                         characters = enrichedCharacters,
@@ -503,7 +546,7 @@ fun CharactersCatalogScreen(
                 },
                 trailingIcon = {
                     if (uiState.searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.onSearchQueryChanged("") }) {
+                        IconButton(onClick = { viewModel.clearSearch() }) {
                             Icon(
                                 imageVector = Icons.Outlined.Close,
                                 contentDescription = "Очистити пошук"
@@ -536,6 +579,13 @@ fun CharactersCatalogScreen(
                     ErrorStateView(
                         message = uiState.errorMessage!!,
                         onRetry = { viewModel.retry() }
+                    )
+                }
+                uiState.characters.isEmpty() && uiState.searchQuery.isNotBlank() -> {
+                    EmptySearchStateView(
+                        query = uiState.searchQuery.trim(),
+                        status = uiState.selectedStatus,
+                        onClearSearch = { viewModel.clearSearch() }
                     )
                 }
                 uiState.characters.isEmpty() -> {
@@ -1246,6 +1296,47 @@ fun ErrorStateView(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Спробувати ще")
+            }
+        }
+    }
+}
+
+@Composable
+fun EmptySearchStateView(
+    query: String,
+    status: String,
+    onClearSearch: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                imageVector = Icons.Outlined.Search,
+                contentDescription = null,
+                modifier = Modifier.size(56.dp),
+                tint = MaterialTheme.colorScheme.outline
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Нічого не знайдено",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            val categoryNote = if (status == "Всі") "" else " у категорії «$status»"
+            Text(
+                text = "За запитом «$query»$categoryNote персонажів не знайдено.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.outline,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            OutlinedButton(onClick = onClearSearch) {
+                Text("Очистити пошук")
             }
         }
     }
